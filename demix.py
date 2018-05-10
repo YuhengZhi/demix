@@ -33,109 +33,119 @@ from logger import Logger
 
 
 class Demix(nn.Module):
-    def __init__(self, mix_ratio=0.8):
+    def __init__(self, mix_begin="input"):
         super(Demix, self).__init__()
 
-        self.mix_ratio = mix_ratio
-
-        self.encode = nn.Sequential(
-            nn.Conv2d(3, 96, kernel_size=11, stride=2, padding=2),  # 64x64 -> 29x29
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(3, 96, kernel_size=11, stride=4, padding=2),  # 227 -> 55
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
+        )
+        self.pool1 = nn.MaxPool2d(kernel_size=3, stride=2),  # 55 -> 27
+        self.conv2 = nn.Sequential(
             nn.Conv2d(96, 256, kernel_size=5, padding=2),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
+        )
+        self.pool2 = nn.MaxPool2d(kernel_size=3, stride=2),  # 27 -> 13
+        self.conv3 = nn.Sequential(
             nn.Conv2d(256, 384, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+        )
+        self.conv4 = nn.Sequential(
             nn.Conv2d(384, 384, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+        )
+        self.conv5 = nn.Sequential(
             nn.Conv2d(384, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            # nn.MaxPool2d(kernel_size=3, stride=2)
         )
-        self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(256, 256, kernel_size=3, bias=False),
-            nn.BatchNorm2d(256),
+
+        layer_name = ['input', 'conv1', 'pool1', 'conv2', 'pool2',
+                      'conv3', 'conv4', 'conv5']
+        layers = [None, self.conv1, self.pool1, self.conv2, self.pool2,
+                  self.conv3, self.conv4, self.conv5]
+
+        independent_encoding_layers = []
+        mixup_encoding_layers = []
+
+        flag_independent = True
+        for name, layer in zip(layer_name, layers):
+            if flag_independent and layer is not None:
+                independent_encoding_layers.append(layer)
+            else:
+                mixup_encoding_layers.append(layer)
+            if name == mix_begin:
+                flag_independent = False
+
+        self.independent_encode = nn.Sequential(*independent_encoding_layers)
+        self.mixup_encode = nn.Sequential(*mixup_encoding_layers)
+
+        # self.encode = nn.Sequential([
+        #     nn.MaxPool2d(kernel_size=3, stride=2),  # 55 -> 27
+        #     nn.Conv2d(96, 256, kernel_size=5, padding=2),
+        #     nn.ReLU(inplace=True),
+        #     nn.MaxPool2d(kernel_size=3, stride=2),  # 27 -> 13
+        #     nn.Conv2d(256, 384, kernel_size=3, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(384, 384, kernel_size=3, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(384, 256, kernel_size=3, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     # nn.MaxPool2d(kernel_size=3, stride=2)
+        #     ]
+        # )
+
+        self.decode = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=1),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-        )
 
-        self.deconv2 = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            nn.ConvTranspose2d(512, 768, kernel_size=3, padding=1),
+            nn.BatchNorm2d(768),
             nn.ReLU(inplace=True),
-        )
 
-        self.deconv3 = nn.Sequential(
-            nn.ConvTranspose2d(256, 64, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.ConvTranspose2d(768, 768, kernel_size=3, padding=1),
+            nn.BatchNorm2d(768),
             nn.ReLU(inplace=True),
-        )
 
-        self.deconv4_1 = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True)
-        )
+            # 13 -> 13
+            nn.ConvTranspose2d(768, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
 
-        self.deconv4_2 = nn.Sequential(
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True)
-        )
+            # 13 -> 27
+            nn.ConvTranspose2d(512, 512, kernel_size=3, stride=2),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
 
-        self.deconv4_3 = nn.Sequential(
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True)
-        )
+            # 27 -> 27
+            nn.ConvTranspose2d(512, 384, 5, stride=1, padding=2),
+            nn.BatchNorm2d(384),
+            nn.ReLU(inplace=True),
 
-        self.deconv5_1 = nn.Sequential(
-            nn.ConvTranspose2d(16, 8, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(8),
-            nn.ReLU(inplace=True)
-        )
+            # 27 -> 55
+            nn.ConvTranspose2d(384, 384, 3, 2),
+            nn.BatchNorm2d(384),
+            nn.ReLU(inplace=True),
 
-        self.deconv5_2 = nn.Sequential(
-            nn.Conv2d(8, 8, 3, 1, 1),
-            nn.BatchNorm2d(8),
-            nn.ReLU(inplace=True)
-        )
-
-        self.deconv5_3 = nn.Sequential(
-            nn.Conv2d(8, 8, 3, 1, 1),
-            nn.BatchNorm2d(8),
-            nn.ReLU(inplace=True)
-        )
-
-        self.deconv5_4 = nn.Sequential(
-            nn.Conv2d(8, 3, 3, 1, 1),
+            # 27 -> 227
+            nn.ConvTranspose2d(384, 6, 11, 4),
+            # nn.BatchNorm2d(6),
             nn.Tanh()
         )
 
-    def forward(self, x):
+    def forward(self, x, mix_ratio):
         n_batch = x.size()[0]
         # print(n_batch)
-        mix_x = self.mix_ratio * x[:n_batch // 2] + (1-self.mix_ratio) * x[n_batch // 2:]
 
-        embedding = self.encode(mix_x)
-        deconv1 = self.deconv1(embedding)
-        # deconv2 = self.deconv2(deconv1)
-        deconv3 = self.deconv3(deconv1)
+        pic1_interm = self.independent_encode(x[:n_batch // 2])
+        pic2_interm = self.independent_encode(x[n_batch // 2:])
 
-        deconv4_1 = self.deconv4_1(deconv3)
-        deconv4_2 = self.deconv4_2(deconv4_1)
-        deconv4_3 = self.deconv4_3(deconv4_2)
+        mixup_interm = self.mix_ratio * pic1_interm + (1-self.mix_ratio) * pic2_interm
+        mixup_embedding = self.mixup_encode(mixup_interm)
 
-        pic1_deconv5_1 = self.deconv5_1(deconv4_3[:, :16])
-        pic2_deconv5_1 = self.deconv5_1(deconv4_3[:, 16:])
-        pic1_deconv5_2 = self.deconv5_2(pic1_deconv5_1)
-        pic2_deconv5_2 = self.deconv5_2(pic2_deconv5_1)
-        pic1_deconv5_3 = self.deconv5_3(pic1_deconv5_2)
-        pic2_deconv5_3 = self.deconv5_3(pic2_deconv5_2)
-        pic1_deconv5_4 = self.deconv5_4(pic1_deconv5_3)
-        pic2_deconv5_4 = self.deconv5_4(pic2_deconv5_3)
+        reconst = self.decode(mixup_embedding)
 
-        return torch.cat((pic1_deconv5_4, pic2_deconv5_4), dim=1)
+        return reconst
 
 
 # define Loss Function and Optimizer
@@ -209,15 +219,15 @@ if __name__ == '__main__':
                         help='Ratio of the first image takes part in the mixed input (default: 0.8)')
     parser.add_argument('--load_from_checkpoint', default='',
                         help='Path to restore saved model.')
-    parser.add_argument('--continue_training', default=True, type=bool,
+    parser.add_argument('--continue_training', default=1, type=int,
                         help='Are you continuing previous training process?')
-    parser.add_argument('--cuda', default=True, type=bool,
+    parser.add_argument('--cuda', default=1, type=int,
                         help='Using cuda or cpu?')
 
     args = parser.parse_args()
     print(args)
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
     print(args.__dict__)
 
@@ -226,7 +236,7 @@ if __name__ == '__main__':
         model = model.cuda()
 
     print("Testing:")
-    x = torch.zeros([2, 3, 64, 64])
+    x = torch.zeros([2, 3, 227, 227])
     x = Variable(x)
     if args.cuda:
         x = x.cuda()
@@ -236,7 +246,7 @@ if __name__ == '__main__':
 
     # Data loading code
     transform = transforms.Compose([
-        # transforms.RandomResizedCrop(224),
+        transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -247,7 +257,7 @@ if __name__ == '__main__':
     valdir = os.path.join(args.data, 'val')
     train = datasets.ImageFolder(traindir, transform)
     print(train)
-    val = datasets.ImageFolder(valdir, transform)
+    # val = datasets.ImageFolder(valdir, transform)
     train_loader = torch.utils.data.DataLoader(
         train, batch_size=2 * args.batchSize, shuffle=True, num_workers=args.nThreads)
     # train_loader.dataset.labels.cuda()
@@ -329,4 +339,4 @@ if __name__ == '__main__':
         torch.save({"epoch": epoch,
                     "state_dict":model.state_dict(),
                     "args": args},
-                   '{}/demix_epoch{}.pth'.format(args.saved_model, epoch))
+                   '{}/demix_epoch{}.pkl'.format(args.saved_model, epoch))

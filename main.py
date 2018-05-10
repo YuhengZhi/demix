@@ -13,4 +13,6 @@ print(c(input_feature))
 
 nn.Container
 
+import tensorflow as tf
+tf.Tensor(np.array())
 
