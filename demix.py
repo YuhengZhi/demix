@@ -150,8 +150,8 @@ class Demix(nn.Module):
         mixup_interm = mix_ratio * pic1_interm + (1 - mix_ratio) * pic2_interm
         mixup_embedding = self.mixup_encode(mixup_interm)
 
-        pic1 = self.decode(mixup_embedding)
-        pic2 = (mixup_interm - mix_ratio * pic1) / (1 - mix_ratio)
+        pic2 = self.decode(mixup_embedding)
+        pic1 = (mixup_interm - (1 - mix_ratio) * pic2) / mix_ratio
 
         return torch.cat((pic1, pic2), dim=1)
 
