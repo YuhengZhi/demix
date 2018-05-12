@@ -95,40 +95,40 @@ class Demix(nn.Module):
         # )
 
         self.decode = nn.Sequential(
-            nn.Conv2d(256, 512, kernel_size=1),
-            nn.BatchNorm2d(512),
+            # nn.Conv2d(256, 512, kernel_size=1),
+            # nn.BatchNorm2d(512),
+            # nn.ReLU(inplace=True),
+
+            nn.ConvTranspose2d(256, 384, kernel_size=3, padding=1),
+            nn.BatchNorm2d(384),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(512, 768, kernel_size=3, padding=1),
-            nn.BatchNorm2d(768),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(768, 768, kernel_size=3, padding=1),
-            nn.BatchNorm2d(768),
+            nn.ConvTranspose2d(384, 384, kernel_size=3, padding=1),
+            nn.BatchNorm2d(384),
             nn.ReLU(inplace=True),
 
             # 13 -> 13
-            nn.ConvTranspose2d(768, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
+            nn.ConvTranspose2d(384, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
 
             # 13 -> 27
-            nn.ConvTranspose2d(512, 512, kernel_size=3, stride=2),
-            nn.BatchNorm2d(512),
+            nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
 
             # 27 -> 27
-            nn.ConvTranspose2d(512, 384, 5, stride=1, padding=2),
-            nn.BatchNorm2d(384),
+            nn.ConvTranspose2d(256, 192, 5, stride=1, padding=2),
+            nn.BatchNorm2d(192),
             nn.ReLU(inplace=True),
 
             # 27 -> 55
-            nn.ConvTranspose2d(384, 384, 3, 2),
-            nn.BatchNorm2d(384),
+            nn.ConvTranspose2d(192, 192, 3, 2),
+            nn.BatchNorm2d(192),
             nn.ReLU(inplace=True),
 
             # 27 -> 227
-            nn.ConvTranspose2d(384, 6, 11, 4),
+            nn.ConvTranspose2d(192, 3, 11, 4),
             # nn.BatchNorm2d(6),
             nn.Tanh()
         )
@@ -143,9 +143,10 @@ class Demix(nn.Module):
         mixup_interm = self.mix_ratio * pic1_interm + (1-self.mix_ratio) * pic2_interm
         mixup_embedding = self.mixup_encode(mixup_interm)
 
-        reconst = self.decode(mixup_embedding)
+        pic2 = self.decode(mixup_embedding)
+        pic1 = (mixup_interm - (1 - mix_ratio) * pic2) / mix_ratio
 
-        return reconst
+        return torch.cat((pic1, pic2), dim=1)
 
 
 # define Loss Function and Optimizer
