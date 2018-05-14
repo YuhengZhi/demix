@@ -67,7 +67,6 @@ class Demix(nn.Module):
 
         independent_encoding_layers = []
         mixup_encoding_layers = []
-        models.alexnet()
         flag_independent = True
         for (name, layer) in zip(layer_name, layers):
             if layer is not None:
@@ -163,8 +162,8 @@ class DemixLoss(nn.Module):
         self.img_differ = img_differ
 
     def forward(self, x, demix_output):
-        n_batch = batch_input.size()[0]
-        paired_batch_input = torch.cat((batch_input[:n_batch // 2], batch_input[n_batch // 2:]), dim=1)
+        n_batch = x.size()[0]
+        paired_batch_input = torch.cat((x[:n_batch // 2], x[n_batch // 2:]), dim=1)
         # alter_output = torch.cat((demix_output[:, 3:6], demix_output[:, 0:3]), dim=1)
         loss = nn.MSELoss()(demix_output, paired_batch_input)
         # alter_loss = nn.MSELoss()(alter_output, paired_batch_input)
@@ -304,9 +303,11 @@ if __name__ == '__main__':
         print("Restored model from {}".format(colored(args.load_from_checkpoint, 'green')))
         print("The args are {}".format(colored(checkpoint["args"], 'yellow')))
 
+    model.train(mode=True)
+
     for epoch in range(args.epoch_number, args.n_epochs):
         lr = args.lr * args.lr_decay ** (epoch)
-        optimizer = torch.optim.Adam(model.parameters(), lr)#torch.nn.DataParallel(, device_ids=gpu_ids) momentum=args.momentum)  # , args.momentum)
+        optimizer = torch.optim.SGD(model.parameters(), lr, momentum=args.momentum)#torch.nn.DataParallel(, device_ids=gpu_ids) momentum=args.momentum)  # , args.momentum)
 
         model_dir = '{}/mixup_{}/'.format(args.saved_model, args.mixup)
         if not os.path.exists(model_dir):
@@ -382,6 +383,11 @@ if __name__ == '__main__':
                 }
                 for tag, images in info.items():
                     logger.image_summary(tag, images, step=iteration + epoch * len(train_loader))
+
+                for tag, value in model.named_parameters():
+                    tag = tag.replace('.', '/')
+                    logger.histo_summary(tag, value.data.cpu().numpy(), iteration + epoch * len(train_loader))
+                    logger.histo_summary(tag + '/grad', value.grad.data.cpu().numpy(), iteration + epoch * len(train_loader))
 
             batch_time.update(time.time() - end)
             end = time.time()
