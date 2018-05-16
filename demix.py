@@ -34,7 +34,6 @@ import time
 #         self.img_differ = arg_dict['img_differ']
 #         self.mix_ratio = arg_dict['mix_ratio']
 
-
 class Demix(nn.Module):
     def __init__(self, mix_begin="input"):
         super(Demix, self).__init__()
@@ -139,6 +138,8 @@ class Demix(nn.Module):
             nn.Tanh()
         )
 
+        self.apply(weights_init)
+
     def forward(self, x, mix_ratio=0.8):
         n_batch = x.size()[0]
         # print(n_batch)
@@ -152,8 +153,12 @@ class Demix(nn.Module):
         pic2 = self.decode(mixup_embedding)
         pic1 = (mixup_interm - (1 - mix_ratio) * pic2) / mix_ratio
 
-        return torch.cat((pic1, pic2), dim=1)
+        return torch.cat((pic1, pic2), dim=0)
 
+
+def weights_init(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        nn.init.kaiming_normal(m.weight.data)
 
 # define Loss Function and Optimizer
 class DemixLoss(nn.Module):
@@ -162,10 +167,10 @@ class DemixLoss(nn.Module):
         self.img_differ = img_differ
 
     def forward(self, x, demix_output):
-        n_batch = x.size()[0]
-        paired_batch_input = torch.cat((x[:n_batch // 2], x[n_batch // 2:]), dim=1)
+        # n_batch = x.size()[0]
+        # paired_batch_input = torch.cat((x[:n_batch // 2], x[n_batch // 2:]), dim=1)
         # alter_output = torch.cat((demix_output[:, 3:6], demix_output[:, 0:3]), dim=1)
-        loss = nn.MSELoss()(demix_output, paired_batch_input)
+        loss = nn.MSELoss()(demix_output, x)
         # alter_loss = nn.MSELoss()(alter_output, paired_batch_input)
 
         return loss
@@ -236,7 +241,7 @@ if __name__ == '__main__':
                         help='Parameter of the beta distribution when choosing mixup rate at training')
     parser.add_argument('--mixup_min', default=0.6, type=float,
                         help='Minus mixup rate')
-    parser.add_argument('--mixup_max', default=0.9, type=float,
+    parser.add_argument('--mixup_max', default=0.7, type=float,
                         help='Max mixup rate')
     parser.add_argument('--load_from_checkpoint', default='',
                         help='Path to restore saved model.')
@@ -249,6 +254,10 @@ if __name__ == '__main__':
                              '[input, conv1, conv2, conv3, conv4, conv5]')
     parser.add_argument('--gpu_ids', default='0,1,2,3',
                         help='IDs of the GPUs you wish to use, comma-delimited. (default: 1,2,3,4)')
+    parser.add_argument('--weight_decay', default=1e-5, type=float,
+                        help='Weight decay rate.')
+    parser.add_argument('--lr_decay_interval', default=30, type=int,
+                        help='Number of epochs to decay the learning rate')
 
     args = parser.parse_args()
     print(args)
@@ -258,6 +267,7 @@ if __name__ == '__main__':
         gpu_ids = [int(e) for e in args.gpu_ids.split(',')]
         print(colored(gpu_ids, 'red'))
         model = nn.DataParallel(model, device_ids=gpu_ids).cuda()  # , device_ids=gpu_ids
+    optimizer = torch.optim.Adam(model.parameters(), args.lr, weight_decay=args.weight_decay)
 
     criterion = DemixLoss(img_differ=args.img_differ)
 
@@ -272,7 +282,7 @@ if __name__ == '__main__':
 
     # Data loading code
     transform = transforms.Compose([
-        transforms.RandomResizedCrop(227),
+        transforms.RandomResizedCrop(227, scale=(0.3, 1.0)),
         # transforms.RandomCrop(227),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
@@ -300,14 +310,20 @@ if __name__ == '__main__':
         checkpoint = torch.load(args.load_from_checkpoint)
         model.load_state_dict(checkpoint["state_dict"])
         args.epoch_number = checkpoint["epoch"]
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        except KeyError:
+            print(colored("WARNING: No optimizer dict to load", 'yellow'))
         print("Restored model from {}".format(colored(args.load_from_checkpoint, 'green')))
         print("The args are {}".format(colored(checkpoint["args"], 'yellow')))
 
     model.train(mode=True)
 
     for epoch in range(args.epoch_number, args.n_epochs):
-        lr = args.lr * args.lr_decay ** (epoch)
-        optimizer = torch.optim.SGD(model.parameters(), lr, momentum=args.momentum)#torch.nn.DataParallel(, device_ids=gpu_ids) momentum=args.momentum)  # , args.momentum)
+        decay_time = epoch // args.lr_decay_interval
+        lr = args.lr * (0.1 ** decay_time)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
 
         model_dir = '{}/mixup_{}/'.format(args.saved_model, args.mixup)
         if not os.path.exists(model_dir):
@@ -315,6 +331,7 @@ if __name__ == '__main__':
             print(colored("Creating directory: " + model_dir, 'green'))
         torch.save({"epoch": epoch,
                     "state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
                     "args": args},
                    model_dir + 'lr_{}_demix_epoch{}.pkl'.format(str(args.lr), epoch))
 
@@ -341,7 +358,6 @@ if __name__ == '__main__':
             optimizer.step()
             # new_params = [param.grad for param in model.parameters()]
             # print(new_params[20])
-            sum = 0.
 
             log_interval = len(train_loader) // 50
             if iteration % log_interval == 0:
@@ -354,12 +370,10 @@ if __name__ == '__main__':
                 for tag, value in info.items():
                     logger.scalar_summary(tag, value, step=iteration + epoch * len(train_loader))
 
-            image_log_interval = len(train_loader) // 2
+            image_log_interval = len(train_loader) // 5
             if iteration % image_log_interval == 0:
                 n_batch = batch_input.size()[0]
-                print(n_batch)
-                original_image_1 = batch_input[:10]
-                original_image_2 = batch_input[(n_batch//2):(n_batch//2 + 10)]
+                # print(n_batch)
 
                 def de_normalize(batch_image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
                     de_transform = transforms.Compose([
@@ -372,14 +386,35 @@ if __name__ == '__main__':
                         batch_image[i] = de_transform(batch_image[i])
                     return batch_image
 
-                original_image_1 = de_normalize(original_image_1.data).cpu().numpy()
-                original_image_2 = de_normalize(original_image_2.data).cpu().numpy()
+                def get_recons(input, output, gpus):
+                    n_batch_per_gpu = output.size()[0] // len(gpus)
+                    reconst1 = []
+                    reconst2 = []
+                    original_1 = []
+                    original_2 = []
+                    for i in range(len(gpus)):
+                        start_idx = i * n_batch_per_gpu
+                        original_1.append(input[start_idx:start_idx+2].data.cpu().numpy())
+                        original_2.append(input[(start_idx + n_batch_per_gpu//2):(start_idx + n_batch_per_gpu//2 + 2)]
+                                          .data.cpu().numpy())
+                        reconst1.append(output[start_idx:start_idx+2].data.cpu().numpy())
+                        reconst2.append(output[(start_idx + n_batch_per_gpu//2):(start_idx + n_batch_per_gpu//2 + 2)]
+                                        .data.cpu().numpy())
+                    original_1 = np.concatenate(original_1, axis=0)
+                    original_2 = np.concatenate(original_2, axis=0)
+                    reconst1 = np.concatenate(reconst1, axis=0)
+                    reconst2 = np.concatenate(reconst2, axis=0)
+                    return original_1, original_2, reconst1, reconst2
+
+                original_image_1, original_image_2, rec1, rec2 \
+                    = get_recons(batch_input, demix_output, gpu_ids) if gpu_ids is not None else \
+                    get_recons(batch_input, demix_output, gpus=[None])
                 info = {
                     'Original Image 1': original_image_1,
                     'Original Image 2': original_image_2,
-                    'Mixed Image': (original_image_1 + original_image_2)/2,
-                    'Reconstructed Image 1': de_normalize(demix_output[:10, 0:3].data).cpu().numpy(),
-                    'Reconstructed Image 2': de_normalize(demix_output[:10, 3:6].data).cpu().numpy()
+                    'Mixed Image': original_image_1 * mixup_ratio + original_image_2 * (1-mixup_ratio),
+                    'Reconstructed Image 1': rec1,
+                    'Reconstructed Image 2': rec2
                 }
                 for tag, images in info.items():
                     logger.image_summary(tag, images, step=iteration + epoch * len(train_loader))

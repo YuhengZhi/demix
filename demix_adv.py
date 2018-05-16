@@ -16,6 +16,7 @@ from logger import Logger
 from termcolor import colored
 import numpy as np
 import time
+import functools
 
 # class Args:
 #     def __init__(self, arg_dict):
@@ -139,6 +140,8 @@ class Demix(nn.Module):
             nn.Tanh()
         )
 
+        self.apply(weights_init)
+
     def forward(self, x, mix_ratio=0.8):
         n_batch = x.size()[0]
         # print(n_batch)
@@ -153,6 +156,39 @@ class Demix(nn.Module):
         pic1 = (mixup_interm - (1 - mix_ratio) * pic2) / mix_ratio
 
         return torch.cat((pic1, pic2), dim=1)
+
+
+def weights_init(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        nn.init.kaiming_normal(m.weight.data)
+
+
+def conv_norm_act(in_dim, out_dim, kernel_size, stride, padding=0,
+                  norm=nn.BatchNorm2d, relu=nn.ReLU):
+    return nn.Sequential(
+                        nn.Conv2d(in_dim, out_dim, kernel_size, stride, padding, bias=False),
+                        norm(out_dim),
+                        relu())
+
+
+class Discriminator(nn.Module):
+
+    def __init__(self, dim=64):
+        super(Discriminator, self).__init__()
+
+        lrelu = functools.partial(nn.LeakyReLU, negative_slope=0.2)
+        conv_bn_lrelu = functools.partial(conv_norm_act, relu=lrelu)
+
+        self.ls = nn.Sequential(nn.Conv2d(3, dim, 4, 2, 1), nn.LeakyReLU(0.2),
+                                conv_bn_lrelu(dim * 1, dim * 2, 4, 2, 1),
+                                conv_bn_lrelu(dim * 2, dim * 4, 4, 2, 1),
+                                conv_bn_lrelu(dim * 4, dim * 8, 4, 1, (1, 2)),
+                                nn.Conv2d(dim * 8, 1, 4, 1, (2, 1)))
+
+        self.apply(weights_init)
+
+    def forward(self, x):
+        return self.ls(x)
 
 
 # define Loss Function and Optimizer
@@ -202,6 +238,8 @@ def generate_mixup_ratio(alpha, min_mix=0.6, max_mix=0.9):
 
 
 if __name__ == '__main__':
+    print(colored("DO NOT USE THIS CODE until you FIX the DATAPARRLLEL ERROR!"), 'red')
+    exit(-1)
 
     parser = argparse.ArgumentParser(description='Pytorch DeMix Training')
     parser.add_argument('--data', metavar='PATH', default='data/tiny-imagenet-200',  # required=True,
@@ -249,15 +287,28 @@ if __name__ == '__main__':
                              '[input, conv1, conv2, conv3, conv4, conv5]')
     parser.add_argument('--gpu_ids', default='0,1,2,3',
                         help='IDs of the GPUs you wish to use, comma-delimited. (default: 1,2,3,4)')
+    parser.add_argument('--weight_decay', default=1e-5, type=float,
+                        help='L2 weight Decay rate')
+    parser.add_argument('--d_lr', default=0.001, type=float,
+                        help='Learning rate for discriminator')
+    parser.add_argument('--adv_weight', default=0.001, type=float,
+                        help='Weight for adversarial loss.')
 
     args = parser.parse_args()
     print(args)
 
     model = Demix(mix_begin=args.mixup)
+    D = Discriminator(dim=64)
     if args.cuda:
         gpu_ids = [int(e) for e in args.gpu_ids.split(',')]
         print(colored(gpu_ids, 'red'))
         model = nn.DataParallel(model, device_ids=gpu_ids).cuda()  # , device_ids=gpu_ids
+        D = nn.DataParallel(D, device_ids=gpu_ids).cuda()
+
+    g_optimizer = torch.optim.SGD(model.parameters(), args.lr, momentum=args.momentum,
+                                  weight_decay=1e-5)  # torch.nn.DataParallel(, device_ids=gpu_ids) momentum=args.momentum)  # , args.momentum)
+    d_optimizer = torch.optim.SGD(D.parameters(), args.d_lr, momentum=args.momentum,
+                                  weight_decay=1e-5)
 
     criterion = DemixLoss(img_differ=args.img_differ)
 
@@ -298,25 +349,36 @@ if __name__ == '__main__':
 
     if not args.load_from_checkpoint == '':
         checkpoint = torch.load(args.load_from_checkpoint)
-        model.load_state_dict(checkpoint["state_dict"])
+        model.load_state_dict(checkpoint["G"])
+        D.load_state_dict(checkpoint["D"])
+        g_optimizer.load_state_dict(checkpoint["g_optimizer"])
+        d_optimizer.load_state_dict(checkpoint["d_optimizer"])
         args.epoch_number = checkpoint["epoch"]
         print("Restored model from {}".format(colored(args.load_from_checkpoint, 'green')))
         print("The args are {}".format(colored(checkpoint["args"], 'yellow')))
 
     model.train(mode=True)
+    D.train(mode=True)
 
     for epoch in range(args.epoch_number, args.n_epochs):
         lr = args.lr * args.lr_decay ** (epoch)
-        optimizer = torch.optim.SGD(model.parameters(), lr, momentum=args.momentum)#torch.nn.DataParallel(, device_ids=gpu_ids) momentum=args.momentum)  # , args.momentum)
+        d_lr = args.d_lr * args.lr_decay ** (epoch)
+        for param_group in g_optimizer.param_groups:
+            param_group['lr'] = lr
+        for param_group in d_optimizer.param_groups:
+            param_group['lr'] = d_lr
 
         model_dir = '{}/mixup_{}/'.format(args.saved_model, args.mixup)
         if not os.path.exists(model_dir):
             os.mkdir(model_dir)
             print(colored("Creating directory: " + model_dir, 'green'))
         torch.save({"epoch": epoch,
-                    "state_dict": model.state_dict(),
+                    "G": model.state_dict(),
+                    "D": D.state_dict(),
+                    "g_optimizer": g_optimizer,
+                    "d_optimizer": d_optimizer,
                     "args": args},
-                   model_dir + 'lr_{}_demix_epoch{}.pkl'.format(str(args.lr), epoch))
+                   model_dir + 'lr_{}_adv_demix_epoch{}.pkl'.format(str(args.lr), epoch))
 
         batch_time = AverageMeter()
         data_time = AverageMeter()
@@ -325,36 +387,64 @@ if __name__ == '__main__':
         for iteration, data in enumerate(train_loader, 1):
             data_time.update(time.time() - end)
 
-            optimizer.zero_grad()
             batch_input, _ = data
 
             batch_input = Variable(batch_input)
             if args.cuda:
                 batch_input = batch_input.cuda()
 
+            # G training
             mixup_ratio = generate_mixup_ratio(alpha=args.mixup_alpha, min_mix=args.mixup_min, max_mix=args.mixup_max)
 
             demix_output = model.forward(batch_input, mix_ratio=mixup_ratio)
-            demix_loss = criterion(batch_input, demix_output)
-            demix_loss.backward()
+            rec_batch = torch.cat((demix_output[:, :3], demix_output[:, 3:]), dim=0)
+            f_dis = D(rec_batch)
+            r_label = Variable(torch.ones(f_dis.size())).cuda()
+            MSE = nn.MSELoss()
+            gen_loss = MSE(f_dis, r_label)
 
-            optimizer.step()
-            # new_params = [param.grad for param in model.parameters()]
-            # print(new_params[20])
-            sum = 0.
+            demix_loss = criterion(batch_input, demix_output)
+
+            g_loss = demix_loss + args.adv_weight * gen_loss
+
+            g_optimizer.zero_grad()
+            g_loss.backward(retain_graph=True)
+            g_optimizer.step()
+
+            # D training
+            f_dis = D(rec_batch)
+            r_dis = D(batch_input)
+            f_label = Variable(torch.zeros(f_dis.size())).cuda()
+            r_label = Variable(torch.ones(r_dis.size())).cuda()
+
+            d_r_loss = MSE(r_dis, r_label)
+            d_f_loss = MSE(f_dis, f_label)
+            dis_loss = d_r_loss + d_f_loss
+
+            d_loss = dis_loss * args.adv_weight
+
+            D.zero_grad()
+            d_loss.backward()
+            d_optimizer.step()
 
             log_interval = len(train_loader) // 50
             if iteration % log_interval == 0:
-                print("Epoch {}, iteration {}/{}, lr: {}, demix_loss: {}, data_time: {}, batch_time: {}"
-                      .format(epoch, iteration, len(train_loader), lr, demix_loss.data[0], data_time.avg, batch_time.avg))
+                print("Epoch {}, iteration {}/{}, lr: {}, d_lr: {}, g_loss: {}, demix_loss: {}, "
+                      "gen_loss: {}, dis_loss: {}, data_time: {}, batch_time: {}"
+                      .format(epoch, iteration, len(train_loader), lr, d_lr, g_loss.data[0],
+                              demix_loss.data[0], gen_loss.data[0], dis_loss.data[0],
+                              data_time.avg, batch_time.avg))
                 info = {
-                    'loss': demix_loss.data[0],
+                    'g_loss': g_loss.data[0],
+                    'demix_loss': demix_loss.data[0],
+                    'gen_loss': gen_loss.data[0],
+                    'dis_loss': dis_loss.data[0],
                     'learning_rate': lr
                 }
                 for tag, value in info.items():
-                    logger.scalar_summary(tag, value, step=iteration + epoch * len(train_loader))
+                    logger.scalar_summary(tag, value, step=iteration + (epoch-1) * len(train_loader))
 
-            image_log_interval = len(train_loader) // 2
+            image_log_interval = len(train_loader) // 5
             if iteration % image_log_interval == 0:
                 n_batch = batch_input.size()[0]
                 print(n_batch)
